@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">FTP PC</string>
+
+    <!-- Server Dashboard -->
+    <string name="home_app_title">FTP PC</string>
+    <string name="status_online">Online</string>
+    <string name="status_offline">Offline</string>
+    <string name="url_copied">FTP URL copied to clipboard</string>
+    <string name="select_storage_title">SELECT STORAGE</string>
+    <string name="choose_storage_button">CHOOSE STORAGE</string>
+    <string name="storage_location_updated">FTP %1$d storage set to %2$s</string>
+    <string name="storage_permission_dialog_title">Allow Storage Access</string>
+    <string name="storage_permission_dialog_body">Grant read and write storage permission so your PC can copy, move, and delete files on Internal Storage and SD Card.</string>
+    <string name="allow">Allow</string>
+    <string name="not_now">Not Now</string>
+    <string name="developer_attribution">Developer: Vilson Sonkar</string>
+
+    <!-- Notification -->
+    <string name="notif_channel_name">FTP Server Status</string>
+    <string name="notif_channel_desc">Shows active FTP URL and transfer status while running</string>
+    <string name="notif_action_stop">Stop Server</string>
+</resources>

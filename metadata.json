@@ -1,0 +1,6 @@
+{
+  "name": "FTP PC",
+  "description": "Wireless FTP server by Vilson Sonkar for fast file transfer and storage management with Windows PC over hotspot or Wi-Fi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
