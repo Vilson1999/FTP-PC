@@ -16,8 +16,17 @@ android {
     applicationId = "com.ftppc.vilson"
     minSdk = 28
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+
+    val ciRunNumber = providers.environmentVariable("GITHUB_RUN_NUMBER").orNull?.toIntOrNull()
+    val appVersionCode = providers.environmentVariable("APP_VERSION_CODE").orNull?.toIntOrNull()
+      ?: ciRunNumber?.let { 100 + it }
+      ?: 2
+    val appVersionName = providers.environmentVariable("APP_VERSION_NAME").orNull
+      ?.takeIf { it.isNotBlank() }
+      ?: if (ciRunNumber != null) "1.0.$ciRunNumber" else "1.1"
+
+    versionCode = appVersionCode
+    versionName = appVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

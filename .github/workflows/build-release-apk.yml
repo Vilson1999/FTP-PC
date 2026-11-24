@@ -60,6 +60,12 @@ jobs:
         with:
           gradle-version: 9.3.1
 
+      - name: Restore cached signing keystore (fallback when secrets unset)
+        uses: actions/cache@v5
+        with:
+          path: .ci-signing
+          key: ftppc-fallback-keystore-v1
+
       - name: Configure release signing keystore
         shell: bash
         env:
@@ -67,28 +73,57 @@ jobs:
           SECRET_STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          KEYSTORE_FILE="${{ github.workspace }}/my-upload-key.jks"
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$SECRET_STORE_PASSWORD" ] && [ -n "$SECRET_KEY_PASSWORD" ]; then
+            KEYSTORE_FILE="${{ github.workspace }}/my-upload-key.jks"
             echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
             echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$SECRET_STORE_PASSWORD" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$SECRET_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "Using release keystore from repository secrets."
           else
             FALLBACK_PASS="ftppc-release-signing"
-            rm -f "$KEYSTORE_FILE"
-            keytool -genkeypair -v \
-              -keystore "$KEYSTORE_FILE" \
-              -storepass "$FALLBACK_PASS" \
-              -keypass "$FALLBACK_PASS" \
-              -alias upload \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Vilson Sonkar, O=FTP PC, C=IN"
+            mkdir -p "${{ github.workspace }}/.ci-signing"
+            KEYSTORE_FILE="${{ github.workspace }}/.ci-signing/my-upload-key.jks"
+            if [ ! -f "$KEYSTORE_FILE" ]; then
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_FILE" \
+                -storepass "$FALLBACK_PASS" \
+                -keypass "$FALLBACK_PASS" \
+                -alias upload \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -dname "CN=Vilson Sonkar, O=FTP PC, C=IN"
+              echo "Generated new fallback keystore and caching it for future update builds."
+            else
+              echo "Reusing cached fallback keystore so APK updates install cleanly over previous versions."
+            fi
             echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
             echo "STORE_PASSWORD=$FALLBACK_PASS" >> "$GITHUB_ENV"
             echo "KEY_PASSWORD=$FALLBACK_PASS" >> "$GITHUB_ENV"
           fi
+
+      - name: Determine release version (update-compatible)
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          BASE_VER="1.0"
+          CODE=$((100 + ${{ github.run_number }}))
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+            VER="${TAG#v}"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+            VER="${TAG#v}"
+          else
+            VER="${BASE_VER}.${{ github.run_number }}"
+            TAG="v${VER}"
+          fi
+          echo "APP_VERSION_CODE=$CODE" >> "$GITHUB_ENV"
+          echo "APP_VERSION_NAME=$VER" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Building release $TAG (versionName=$VER, versionCode=$CODE)"
 
       - name: Run FTP engine unit tests
         run: gradle :app:testDebugUnitTest --tests "com.example.FtpServerEngineTest" --tests "com.example.ExampleUnitTest" --no-daemon
@@ -139,19 +174,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          INPUT_TAG: ${{ inputs.release_tag }}
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAG="${{ github.ref_name }}"
-          elif [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
-          else
-            VER=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
-            VER="${VER:-1.0}"
-            TAG="v${VER}.${{ github.run_number }}"
-          fi
-
-          NOTES="FTP PC Release $TAG (ARMv7, ARMv8 arm64-v8a, and Universal release APKs). Built by Vilson Sonkar."
+          TAG="${RELEASE_TAG}"
+          NOTES="FTP PC $TAG (versionName ${APP_VERSION_NAME}, versionCode ${APP_VERSION_CODE}) — ARMv7, ARMv8 (arm64-v8a), and Universal release APKs. Installs directly over older versions signed with the same key. Developer: Vilson Sonkar."
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               dist-apks/armv7/ftp-pc-armv7-release.apk \
