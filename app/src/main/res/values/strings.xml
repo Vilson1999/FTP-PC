@@ -4,7 +4,9 @@
     <!-- Server Dashboard -->
     <string name="home_app_title">FTP PC</string>
     <string name="status_online">Online</string>
+    <string name="status_online_count">Online (%1$d)</string>
     <string name="status_offline">Offline</string>
+    <string name="active_ftp_slots_summary">Active: %1$s</string>
     <string name="url_copied">FTP URL copied to clipboard</string>
     <string name="select_storage_title">SELECT STORAGE</string>
     <string name="choose_storage_button">CHOOSE STORAGE</string>

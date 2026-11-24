@@ -35,7 +35,7 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
     val settings: StateFlow<AppSettings> = settingsRepo.settingsFlow
         .stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings())
 
-    val telemetry: StateFlow<FtpEngineTelemetry> = engine.telemetry
+    val slotTelemetries: StateFlow<Map<Int, FtpEngineTelemetry>> = engine.slotTelemetries
 
     private val _endpoints = MutableStateFlow<List<NetworkEndpoint>>(emptyList())
     val endpoints: StateFlow<List<NetworkEndpoint>> = _endpoints.asStateFlow()
@@ -78,25 +78,30 @@ class ServerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun toggleServer() {
-        when (telemetry.value.runState) {
+    fun toggleSlotServer(slot: Int = settings.value.selectedFtpSlot) {
+        val clamped = slot.coerceIn(1, 4)
+        val state = slotTelemetries.value[clamped]?.runState ?: ServerRunState.STOPPED
+        when (state) {
             ServerRunState.RUNNING, ServerRunState.STARTING -> {
-                FtpServerService.stopServer(app)
-                engine.stop()
+                FtpServerService.stopSlot(app, clamped)
+                viewModelScope.launch(Dispatchers.IO) {
+                    engine.stopSlot(clamped)
+                }
             }
             ServerRunState.STOPPED, ServerRunState.ERROR -> {
-                FtpServerService.startServer(app)
+                FtpServerService.startSlot(app, clamped)
             }
         }
     }
 
     fun onAppBackgrounded() {
-        val state = telemetry.value.runState
-        val isFtpActive = state == ServerRunState.RUNNING || state == ServerRunState.STARTING
-        if (!isFtpActive || !settings.value.runInBackground) {
-            FtpServerService.stopServer(app)
-            if (isFtpActive) {
-                engine.stop()
+        val anyActive = engine.hasAnyActiveSlot()
+        if (!anyActive || !settings.value.runInBackground) {
+            FtpServerService.stopAll(app)
+            if (anyActive) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    engine.stopAll()
+                }
             }
         }
     }

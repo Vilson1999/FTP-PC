@@ -277,6 +277,154 @@ class FtpServerEngineTest {
         }
     }
 
+    @Test
+    fun twoFtpSlots_runSimultaneouslyOnDifferentPortsAndRoots() {
+        val slot1Dir = Files.createTempDirectory("beamftp_concurrent_1").toFile()
+        val slot2Dir = Files.createTempDirectory("beamftp_concurrent_2").toFile()
+        try {
+            File(slot1Dir, "internal_only.txt").writeText("from-slot-1", StandardCharsets.UTF_8)
+            File(slot2Dir, "sdcard_only.txt").writeText("from-slot-2", StandardCharsets.UTF_8)
+
+            val slotStorage = VirtualStorageManager(
+                context = null,
+                customQuickShareDir = tempDir,
+                customSlotRootDirs = mapOf(1 to slot1Dir, 2 to slot2Dir)
+            )
+            val multiEngine = FtpServerEngine(slotStorage)
+            val port1 = ServerSocket(0).use { it.localPort }
+            val port2 = ServerSocket(0).use { it.localPort }
+            val settings = AppSettings(allowAnonymous = true)
+
+            multiEngine.startSlot(1, settings, customPort = port1)
+            multiEngine.startSlot(2, settings, customPort = port2)
+
+            val deadline = System.currentTimeMillis() + 4000L
+            while (
+                (multiEngine.slotTelemetries.value[1]?.runState != ServerRunState.RUNNING ||
+                    multiEngine.slotTelemetries.value[2]?.runState != ServerRunState.RUNNING) &&
+                System.currentTimeMillis() < deadline
+            ) {
+                Thread.sleep(25)
+            }
+
+            assertEquals(ServerRunState.RUNNING, multiEngine.slotTelemetries.value[1]?.runState)
+            assertEquals(ServerRunState.RUNNING, multiEngine.slotTelemetries.value[2]?.runState)
+            assertTrue(multiEngine.hasAnyActiveSlot())
+
+            // Client 1 connected to FTP 1 while Client 2 connected to FTP 2 concurrently
+            Socket("127.0.0.1", port1).use { ctrl1 ->
+                Socket("127.0.0.1", port2).use { ctrl2 ->
+                    ctrl1.soTimeout = 3000
+                    ctrl2.soTimeout = 3000
+                    val reader1 = BufferedReader(InputStreamReader(ctrl1.getInputStream(), StandardCharsets.UTF_8))
+                    val writer1 = BufferedWriter(OutputStreamWriter(ctrl1.getOutputStream(), StandardCharsets.UTF_8))
+                    val reader2 = BufferedReader(InputStreamReader(ctrl2.getInputStream(), StandardCharsets.UTF_8))
+                    val writer2 = BufferedWriter(OutputStreamWriter(ctrl2.getOutputStream(), StandardCharsets.UTF_8))
+
+                    assertTrue(reader1.readLine().startsWith("220"))
+                    assertTrue(reader2.readLine().startsWith("220"))
+
+                    writer1.write("USER anonymous\r\n"); writer1.flush()
+                    writer2.write("USER anonymous\r\n"); writer2.flush()
+                    assertTrue(reader1.readLine().startsWith("331"))
+                    assertTrue(reader2.readLine().startsWith("331"))
+
+                    writer1.write("PASS pc1@test\r\n"); writer1.flush()
+                    writer2.write("PASS pc2@test\r\n"); writer2.flush()
+                    assertTrue(reader1.readLine().startsWith("230"))
+                    assertTrue(reader2.readLine().startsWith("230"))
+
+                    val dlPort1 = enterPasv(writer1, reader1)
+                    val dlSock1 = Socket("127.0.0.1", dlPort1)
+                    writer1.write("RETR /internal_only.txt\r\n"); writer1.flush()
+                    assertTrue(reader1.readLine().startsWith("150"))
+                    assertEquals("from-slot-1", dlSock1.getInputStream().use { it.readBytes().toString(StandardCharsets.UTF_8) })
+                    assertTrue(reader1.readLine().startsWith("226"))
+
+                    val dlPort2 = enterPasv(writer2, reader2)
+                    val dlSock2 = Socket("127.0.0.1", dlPort2)
+                    writer2.write("RETR /sdcard_only.txt\r\n"); writer2.flush()
+                    assertTrue(reader2.readLine().startsWith("150"))
+                    assertEquals("from-slot-2", dlSock2.getInputStream().use { it.readBytes().toString(StandardCharsets.UTF_8) })
+                    assertTrue(reader2.readLine().startsWith("226"))
+
+                    writer1.write("QUIT\r\n"); writer1.flush()
+                    writer2.write("QUIT\r\n"); writer2.flush()
+                }
+            }
+
+            // Stopping FTP 1 must leave FTP 2 running
+            multiEngine.stopSlot(1)
+            assertEquals(ServerRunState.STOPPED, multiEngine.slotTelemetries.value[1]?.runState)
+            assertEquals(ServerRunState.RUNNING, multiEngine.slotTelemetries.value[2]?.runState)
+            assertTrue(multiEngine.hasAnyActiveSlot())
+
+            multiEngine.stopSlot(2)
+            assertEquals(ServerRunState.STOPPED, multiEngine.slotTelemetries.value[2]?.runState)
+            assertFalse(multiEngine.hasAnyActiveSlot())
+        } finally {
+            slot1Dir.deleteRecursively()
+            slot2Dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun startAll_runsAllFourFtpSlotsSimultaneously() {
+        val dirs = (1..4).associateWith { Files.createTempDirectory("beamftp_all_$it").toFile() }
+        try {
+            dirs.forEach { (slot, dir) ->
+                File(dir, "slot_${slot}.txt").writeText("content-$slot", StandardCharsets.UTF_8)
+            }
+            val slotStorage = VirtualStorageManager(
+                context = null,
+                customQuickShareDir = tempDir,
+                customSlotRootDirs = dirs
+            )
+            val allEngine = FtpServerEngine(slotStorage)
+            val ports = (1..4).associateWith { ServerSocket(0).use { sock -> sock.localPort } }
+            val settings = AppSettings(allowAnonymous = true)
+
+            allEngine.startAll(settings, customPorts = ports)
+
+            val deadline = System.currentTimeMillis() + 5000L
+            while ((1..4).any { allEngine.slotTelemetries.value[it]?.runState != ServerRunState.RUNNING } &&
+                System.currentTimeMillis() < deadline
+            ) {
+                Thread.sleep(25)
+            }
+
+            for (slot in 1..4) {
+                assertEquals(ServerRunState.RUNNING, allEngine.slotTelemetries.value[slot]?.runState)
+                Socket("127.0.0.1", ports.getValue(slot)).use { ctrl ->
+                    ctrl.soTimeout = 3000
+                    val reader = BufferedReader(InputStreamReader(ctrl.getInputStream(), StandardCharsets.UTF_8))
+                    val writer = BufferedWriter(OutputStreamWriter(ctrl.getOutputStream(), StandardCharsets.UTF_8))
+                    assertTrue(reader.readLine().startsWith("220"))
+                    writer.write("USER anonymous\r\n"); writer.flush()
+                    assertTrue(reader.readLine().startsWith("331"))
+                    writer.write("PASS pc@test\r\n"); writer.flush()
+                    assertTrue(reader.readLine().startsWith("230"))
+
+                    val dlPort = enterPasv(writer, reader)
+                    val dlSock = Socket("127.0.0.1", dlPort)
+                    writer.write("RETR /slot_${slot}.txt\r\n"); writer.flush()
+                    assertTrue(reader.readLine().startsWith("150"))
+                    assertEquals("content-$slot", dlSock.getInputStream().use { it.readBytes().toString(StandardCharsets.UTF_8) })
+                    assertTrue(reader.readLine().startsWith("226"))
+                    writer.write("QUIT\r\n"); writer.flush()
+                }
+            }
+
+            allEngine.stopAll()
+            assertFalse(allEngine.hasAnyActiveSlot())
+            for (slot in 1..4) {
+                assertEquals(ServerRunState.STOPPED, allEngine.slotTelemetries.value[slot]?.runState)
+            }
+        } finally {
+            dirs.values.forEach { it.deleteRecursively() }
+        }
+    }
+
     private fun enterPasv(writer: BufferedWriter, reader: BufferedReader): Int {
         writer.write("PASV\r\n")
         writer.flush()

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -57,7 +58,7 @@ private val StopRed = Color(0xFFDC2626)
 @Composable
 fun ServerDashboardScreen(
     settings: AppSettings,
-    telemetry: FtpEngineTelemetry,
+    slotTelemetries: Map<Int, FtpEngineTelemetry>,
     endpoints: List<NetworkEndpoint>,
     onSelectFtpSlot: (Int) -> Unit,
     onToggleServer: () -> Unit,
@@ -66,10 +67,16 @@ fun ServerDashboardScreen(
     onChooseStorage: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isActive = telemetry.runState == ServerRunState.RUNNING ||
-        telemetry.runState == ServerRunState.STARTING
-    val isOnline = telemetry.runState == ServerRunState.RUNNING
     val activeSlot = settings.selectedFtpSlot.coerceIn(1, 4)
+    val selectedTelemetry = slotTelemetries[activeSlot] ?: FtpEngineTelemetry(boundPort = 2120 + activeSlot)
+    val isSelectedActive = selectedTelemetry.runState == ServerRunState.RUNNING ||
+        selectedTelemetry.runState == ServerRunState.STARTING
+    val runningSlots = slotTelemetries
+        .filterValues { it.runState == ServerRunState.RUNNING || it.runState == ServerRunState.STARTING }
+        .keys
+        .sorted()
+    val onlineCount = slotTelemetries.count { it.value.runState == ServerRunState.RUNNING }
+    val anyOnline = onlineCount > 0 || runningSlots.isNotEmpty()
     val slotPort = 2120 + activeSlot
     val activeEndpoint = endpoints.firstOrNull()
     val ftpUrl = activeEndpoint?.toFtpUrl(slotPort, settings.username, settings.allowAnonymous)
@@ -102,21 +109,27 @@ fun ServerDashboardScreen(
                     modifier = Modifier.testTag("app_title_text")
                 )
 
+                val statusLabel = when {
+                    onlineCount > 1 -> stringResource(R.string.status_online_count, onlineCount)
+                    anyOnline -> stringResource(R.string.status_online)
+                    else -> stringResource(R.string.status_offline)
+                }
                 Text(
-                    text = stringResource(if (isOnline) R.string.status_online else R.string.status_offline),
+                    text = statusLabel,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (isOnline) StartGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (anyOnline) StartGreen else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.testTag("ftp_status_text")
                 )
             }
 
             UnifiedFtpControlCard(
                 selectedSlot = activeSlot,
-                isActive = isActive,
+                runningSlots = runningSlots.toSet(),
+                isActive = isSelectedActive,
                 ftpUrl = ftpUrl,
                 hasEndpoint = activeEndpoint != null,
-                errorMessage = telemetry.errorMessage,
+                errorMessage = selectedTelemetry.errorMessage,
                 onSelectSlot = onSelectFtpSlot,
                 onCopyUrl = { onCopyUrl(ftpUrl) },
                 onToggleServer = onToggleServer
@@ -148,6 +161,7 @@ fun ServerDashboardScreen(
 @Composable
 private fun FtpSlotPillsRow(
     selectedSlot: Int,
+    runningSlots: Set<Int> = emptySet(),
     testTagPrefix: String,
     onSelectSlot: (Int) -> Unit
 ) {
@@ -157,6 +171,7 @@ private fun FtpSlotPillsRow(
     ) {
         for (slot in 1..4) {
             val isSelected = selectedSlot == slot
+            val isSlotRunning = slot in runningSlots
             val containerColor by animateColorAsState(
                 targetValue = if (isSelected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surfaceVariant,
@@ -183,7 +198,20 @@ private fun FtpSlotPillsRow(
                     .clickable { onSelectSlot(slot) }
                     .testTag("${testTagPrefix}_$slot")
             ) {
-                Box(contentAlignment = Alignment.Center) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isSlotRunning) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (isSelected) Color.White else StartGreen)
+                        )
+                        Spacer(Modifier.width(5.dp))
+                    }
                     Text(
                         text = "FTP $slot",
                         style = MaterialTheme.typography.labelLarge,
@@ -200,6 +228,7 @@ private fun FtpSlotPillsRow(
 @Composable
 private fun UnifiedFtpControlCard(
     selectedSlot: Int,
+    runningSlots: Set<Int>,
     isActive: Boolean,
     ftpUrl: String,
     hasEndpoint: Boolean,
@@ -220,6 +249,7 @@ private fun UnifiedFtpControlCard(
         ) {
             FtpSlotPillsRow(
                 selectedSlot = selectedSlot,
+                runningSlots = runningSlots,
                 testTagPrefix = "ftp_pill",
                 onSelectSlot = onSelectSlot
             )
@@ -305,6 +335,21 @@ private fun UnifiedFtpControlCard(
                     text = if (isActive) "STOP" else "START",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
+                )
+            }
+
+            if (runningSlots.isNotEmpty()) {
+                val activeSummary = runningSlots.sorted().joinToString("  •  ") { slot ->
+                    "FTP $slot (:${2120 + slot})"
+                }
+                Text(
+                    text = stringResource(R.string.active_ftp_slots_summary, activeSummary),
+                    fontFamily = JetBrainsMonoFamily,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = StartGreen,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("active_ftp_slots_summary")
                 )
             }
         }

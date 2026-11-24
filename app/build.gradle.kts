@@ -34,7 +34,7 @@ android {
       isEnable = isReleaseTask
       reset()
       include("armeabi-v7a", "arm64-v8a")
-      isUniversalApk = false
+      isUniversalApk = true
     }
   }
 

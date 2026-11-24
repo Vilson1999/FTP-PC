@@ -1,4 +1,4 @@
-name: Build Release APKs (ARMv7 & ARMv8)
+name: Build Release APKs (ARMv7, ARMv8 & Universal)
 
 on:
   push:
@@ -13,7 +13,7 @@ on:
 
 jobs:
   build-release-apks:
-    name: Build ARMv7 & ARMv8 Release APKs
+    name: Build ARMv7, ARMv8 & Universal Release APKs
     runs-on: ubuntu-latest
 
     steps:
@@ -83,23 +83,25 @@ jobs:
       - name: Run FTP engine unit tests
         run: gradle :app:testDebugUnitTest --tests "com.example.FtpServerEngineTest" --tests "com.example.ExampleUnitTest" --no-daemon
 
-      - name: Build compressed Release APKs (ARMv7 & ARMv8 only)
+      - name: Build compressed Release APKs (ARMv7, ARMv8 & Universal)
         run: gradle :app:assembleRelease --no-daemon
 
-      - name: Verify only ARMv7 and ARMv8 release APKs were generated
+      - name: Verify ARMv7, ARMv8, and Universal release APKs were generated
         shell: bash
         run: |
           APK_DIR="app/build/outputs/apk/release"
           ls -lh "$APK_DIR"
           ARMV7_APK=$(find "$APK_DIR" -maxdepth 1 -name "*armeabi-v7a*release*.apk" | head -n 1)
           ARMV8_APK=$(find "$APK_DIR" -maxdepth 1 -name "*arm64-v8a*release*.apk" | head -n 1)
-          if [ -z "$ARMV7_APK" ] || [ -z "$ARMV8_APK" ]; then
-            echo "Expected separate armeabi-v7a and arm64-v8a release APKs!"
+          UNIVERSAL_APK=$(find "$APK_DIR" -maxdepth 1 -name "*universal*release*.apk" | head -n 1)
+          if [ -z "$ARMV7_APK" ] || [ -z "$ARMV8_APK" ] || [ -z "$UNIVERSAL_APK" ]; then
+            echo "Expected separate armeabi-v7a, arm64-v8a, and universal release APKs!"
             exit 1
           fi
-          mkdir -p dist-apks/armv7 dist-apks/armv8
+          mkdir -p dist-apks/armv7 dist-apks/armv8 dist-apks/universal
           cp "$ARMV7_APK" dist-apks/armv7/ftp-pc-armv7-release.apk
           cp "$ARMV8_APK" dist-apks/armv8/ftp-pc-arm64-v8a-release.apk
+          cp "$UNIVERSAL_APK" dist-apks/universal/ftp-pc-universal-release.apk
 
       - name: Upload ARMv7 Release APK
         uses: actions/upload-artifact@v4
@@ -113,4 +115,11 @@ jobs:
         with:
           name: ftp-pc-arm64-v8a-release-apk
           path: dist-apks/armv8/ftp-pc-arm64-v8a-release.apk
+          if-no-files-found: error
+
+      - name: Upload Universal Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftp-pc-universal-release-apk
+          path: dist-apks/universal/ftp-pc-universal-release.apk
           if-no-files-found: error

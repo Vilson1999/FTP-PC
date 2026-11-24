@@ -21,6 +21,7 @@ import org.apache.ftpserver.ftplet.Ftplet
 import org.apache.ftpserver.ftplet.FtpletResult
 import org.apache.ftpserver.ftplet.FtpSession
 import org.apache.ftpserver.listener.ListenerFactory
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 enum class ServerRunState {
@@ -40,20 +41,30 @@ data class FtpEngineTelemetry(
 class FtpServerEngine(
     private val storage: VirtualStorageManager
 ) {
+    private companion object {
+        const val LEGACY_SLOT_KEY = 0
+    }
+
+    private class SlotRuntime {
+        @Volatile
+        var ftpServer: FtpServer? = null
+        var startJob: Job? = null
+        val activeClientCount = AtomicInteger(0)
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val runtimes = ConcurrentHashMap<Int, SlotRuntime>()
+
+    private val _slotTelemetries = MutableStateFlow(
+        (1..4).associateWith { slot -> FtpEngineTelemetry(boundPort = 2120 + slot) }
+    )
+    val slotTelemetries: StateFlow<Map<Int, FtpEngineTelemetry>> = _slotTelemetries.asStateFlow()
 
     private val _telemetry = MutableStateFlow(FtpEngineTelemetry())
     val telemetry: StateFlow<FtpEngineTelemetry> = _telemetry.asStateFlow()
 
     @Volatile
     private var currentSettings = AppSettings()
-
-    @Volatile
-    private var ftpServer: FtpServer? = null
-
-    private var startJob: Job? = null
-
-    private val activeClientCount = AtomicInteger(0)
 
     fun updateSettings(settings: AppSettings) {
         currentSettings = settings
@@ -63,24 +74,69 @@ class FtpServerEngine(
         storage.updateSlotStorageConfig(settings.selectedFtpSlot, settings.slotStorages)
     }
 
+    fun hasAnyActiveSlot(): Boolean {
+        val slotsActive = _slotTelemetries.value.values.any {
+            it.runState == ServerRunState.RUNNING || it.runState == ServerRunState.STARTING
+        }
+        val legacyActive = _telemetry.value.runState == ServerRunState.RUNNING ||
+            _telemetry.value.runState == ServerRunState.STARTING
+        return slotsActive || legacyActive
+    }
+
+    @Synchronized
+    fun startAll(settings: AppSettings, customPorts: Map<Int, Int>? = null) {
+        updateSettings(settings)
+        for (slot in 1..4) {
+            startSlot(slot, settings, customPort = customPorts?.get(slot))
+        }
+    }
+
+    @Synchronized
+    fun startSlot(slot: Int, settings: AppSettings, customPort: Int? = null) {
+        val clampedSlot = slot.coerceIn(1, 4)
+        val targetPort = customPort ?: (2120 + clampedSlot)
+        startInternal(
+            runtimeKey = clampedSlot,
+            boundSlot = clampedSlot,
+            port = targetPort,
+            settings = settings
+        )
+    }
+
     @Synchronized
     fun start(settings: AppSettings) {
+        startInternal(
+            runtimeKey = LEGACY_SLOT_KEY,
+            boundSlot = null,
+            port = settings.port,
+            settings = settings
+        )
+    }
+
+    private fun startInternal(
+        runtimeKey: Int,
+        boundSlot: Int?,
+        port: Int,
+        settings: AppSettings
+    ) {
         updateSettings(settings)
-        if (_telemetry.value.runState == ServerRunState.RUNNING ||
-            _telemetry.value.runState == ServerRunState.STARTING
+        val existingState = getTelemetryForKey(runtimeKey)
+        if (existingState.runState == ServerRunState.RUNNING ||
+            existingState.runState == ServerRunState.STARTING
         ) {
             return
         }
 
-        _telemetry.update {
+        val runtime = runtimes.getOrPut(runtimeKey) { SlotRuntime() }
+        updateTelemetryForKey(runtimeKey) {
             it.copy(
                 runState = ServerRunState.STARTING,
-                boundPort = settings.port,
+                boundPort = port,
                 errorMessage = null
             )
         }
 
-        startJob = scope.launch {
+        runtime.startJob = scope.launch {
             try {
                 val serverFactory = FtpServerFactory()
 
@@ -92,7 +148,7 @@ class FtpServerEngine(
                 }
 
                 val listenerFactory = ListenerFactory().apply {
-                    port = settings.port
+                    this.port = port
                     serverAddress = "0.0.0.0"
                     dataConnectionConfiguration = dataConfigFactory.createDataConnectionConfiguration()
                 }
@@ -109,22 +165,23 @@ class FtpServerEngine(
                 serverFactory.fileSystem = VirtualFileSystemFactory(
                     storage = storage,
                     isReadOnlyProvider = { currentSettings.readOnly },
-                    bufferSizeKbProvider = { currentSettings.bufferSizeKb }
+                    bufferSizeKbProvider = { currentSettings.bufferSizeKb },
+                    slotProvider = { boundSlot }
                 )
 
                 val ftplets = LinkedHashMap<String, Ftplet>()
-                ftplets["beamTelemetry"] = BeamFtplet()
+                ftplets["beamTelemetry"] = BeamFtplet(runtimeKey, runtime)
                 serverFactory.ftplets = ftplets
 
                 val server = serverFactory.createServer()
                 server.start()
-                ftpServer = server
+                runtime.ftpServer = server
 
                 val actualPort = runCatching {
-                    serverFactory.listeners["default"]?.port ?: settings.port
-                }.getOrDefault(settings.port)
+                    serverFactory.listeners["default"]?.port ?: port
+                }.getOrDefault(port)
 
-                _telemetry.update {
+                updateTelemetryForKey(runtimeKey) {
                     it.copy(
                         runState = ServerRunState.RUNNING,
                         boundPort = actualPort,
@@ -132,12 +189,12 @@ class FtpServerEngine(
                     )
                 }
             } catch (e: Exception) {
-                runCatching { ftpServer?.stop() }
-                ftpServer = null
-                _telemetry.update {
+                runCatching { runtime.ftpServer?.stop() }
+                runtime.ftpServer = null
+                updateTelemetryForKey(runtimeKey) {
                     it.copy(
                         runState = ServerRunState.ERROR,
-                        errorMessage = e.message ?: "Failed to start FTP server on port ${settings.port}"
+                        errorMessage = e.message ?: "Failed to start FTP server on port $port"
                     )
                 }
             }
@@ -145,19 +202,37 @@ class FtpServerEngine(
     }
 
     @Synchronized
-    fun stop() {
-        startJob?.cancel()
-        startJob = null
+    fun stopSlot(slot: Int) {
+        stopInternal(slot.coerceIn(1, 4))
+    }
 
-        val runningServer = ftpServer
-        ftpServer = null
+    @Synchronized
+    fun stopAll() {
+        val keys = (runtimes.keys + LEGACY_SLOT_KEY + (1..4)).distinct()
+        for (key in keys) {
+            stopInternal(key)
+        }
+    }
+
+    @Synchronized
+    fun stop() {
+        stopAll()
+    }
+
+    private fun stopInternal(runtimeKey: Int) {
+        val runtime = runtimes[runtimeKey]
+        runtime?.startJob?.cancel()
+        runtime?.startJob = null
+
+        val runningServer = runtime?.ftpServer
+        runtime?.ftpServer = null
         if (runningServer != null) {
             runCatching { runningServer.stop() }
         }
 
-        activeClientCount.set(0)
+        runtime?.activeClientCount?.set(0)
 
-        _telemetry.update {
+        updateTelemetryForKey(runtimeKey) {
             it.copy(
                 runState = ServerRunState.STOPPED,
                 activeConnections = 0,
@@ -166,7 +241,37 @@ class FtpServerEngine(
         }
     }
 
-    private inner class BeamFtplet : DefaultFtplet() {
+    private fun getTelemetryForKey(runtimeKey: Int): FtpEngineTelemetry {
+        return if (runtimeKey == LEGACY_SLOT_KEY) {
+            _telemetry.value
+        } else {
+            _slotTelemetries.value[runtimeKey] ?: FtpEngineTelemetry(boundPort = 2120 + runtimeKey)
+        }
+    }
+
+    private fun updateTelemetryForKey(
+        runtimeKey: Int,
+        transform: (FtpEngineTelemetry) -> FtpEngineTelemetry
+    ) {
+        if (runtimeKey == LEGACY_SLOT_KEY) {
+            _telemetry.update(transform)
+        } else {
+            _slotTelemetries.update { current ->
+                val updated = current.toMutableMap()
+                val base = updated[runtimeKey] ?: FtpEngineTelemetry(boundPort = 2120 + runtimeKey)
+                updated[runtimeKey] = transform(base)
+                updated
+            }
+            if (runtimeKey == currentSettings.selectedFtpSlot) {
+                _telemetry.value = _slotTelemetries.value[runtimeKey] ?: FtpEngineTelemetry()
+            }
+        }
+    }
+
+    private inner class BeamFtplet(
+        private val runtimeKey: Int,
+        private val runtime: SlotRuntime
+    ) : DefaultFtplet() {
 
         private fun FtpSession.clientIp(): String {
             return clientAddress?.address?.hostAddress ?: ""
@@ -177,14 +282,14 @@ class FtpServerEngine(
             if (ip.isNotEmpty() && !NetworkAddressDetector.isLocalPrivateIp(ip)) {
                 return FtpletResult.DISCONNECT
             }
-            val count = activeClientCount.incrementAndGet()
-            _telemetry.update { it.copy(activeConnections = count) }
+            val count = runtime.activeClientCount.incrementAndGet()
+            updateTelemetryForKey(runtimeKey) { it.copy(activeConnections = count) }
             return FtpletResult.DEFAULT
         }
 
         override fun onDisconnect(session: FtpSession): FtpletResult {
-            val remaining = activeClientCount.decrementAndGet().coerceAtLeast(0)
-            _telemetry.update { it.copy(activeConnections = remaining) }
+            val remaining = runtime.activeClientCount.decrementAndGet().coerceAtLeast(0)
+            updateTelemetryForKey(runtimeKey) { it.copy(activeConnections = remaining) }
             return FtpletResult.DEFAULT
         }
     }

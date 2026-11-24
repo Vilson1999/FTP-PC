@@ -102,8 +102,8 @@ class VirtualStorageManager(
         data class Saf(val label: String, val treeUri: Uri) : SlotDirectRoot
     }
 
-    private fun resolveActiveDirectRoot(): SlotDirectRoot? {
-        val slot = activeFtpSlot.coerceIn(1, 4)
+    private fun resolveActiveDirectRoot(slotOverride: Int? = null): SlotDirectRoot? {
+        val slot = (slotOverride ?: activeFtpSlot).coerceIn(1, 4)
         val slotConfig = slotStorages[slot]
         val configuredUri = slotConfig?.uriString
         if (!configuredUri.isNullOrBlank()) {
@@ -176,7 +176,7 @@ class VirtualStorageManager(
         return this != null && exists() && isDirectory && canRead() && listFiles() != null
     }
 
-    fun isRootDirectlyWritable(): Boolean = resolveActiveDirectRoot() != null
+    fun isRootDirectlyWritable(slot: Int? = null): Boolean = resolveActiveDirectRoot(slot) != null
 
     private fun resolveLocalTarget(mountName: String, rootDir: File, relativeSegments: List<String>, normPath: String): ResolvedTarget? {
         var targetFile = rootDir
@@ -193,11 +193,11 @@ class VirtualStorageManager(
         return ResolvedTarget.LocalTarget(mountName, canonicalRoot, canonicalTarget, normPath)
     }
 
-    private fun resolveTarget(virtualPath: String): ResolvedTarget? {
+    private fun resolveTarget(virtualPath: String, slot: Int? = null): ResolvedTarget? {
         val norm = normalizePath(virtualPath)
         val segments = if (norm == "/") emptyList() else norm.removePrefix("/").split('/').filter { it.isNotEmpty() }
 
-        return when (val directRoot = resolveActiveDirectRoot()) {
+        return when (val directRoot = resolveActiveDirectRoot(slot)) {
             is SlotDirectRoot.Local -> resolveLocalTarget(directRoot.label, directRoot.dir, segments, norm)
             is SlotDirectRoot.Saf -> ResolvedTarget.SafTarget(directRoot.label, directRoot.treeUri, segments, norm)
             null -> {
@@ -208,12 +208,12 @@ class VirtualStorageManager(
         }
     }
 
-    fun exists(virtualPath: String): Boolean = stat(virtualPath) != null
+    fun exists(virtualPath: String, slot: Int? = null): Boolean = stat(virtualPath, slot) != null
 
-    fun isDirectory(virtualPath: String): Boolean = stat(virtualPath)?.isDirectory == true
+    fun isDirectory(virtualPath: String, slot: Int? = null): Boolean = stat(virtualPath, slot)?.isDirectory == true
 
-    fun stat(virtualPath: String): StorageEntry? {
-        val target = resolveTarget(virtualPath) ?: return null
+    fun stat(virtualPath: String, slot: Int? = null): StorageEntry? {
+        val target = resolveTarget(virtualPath, slot) ?: return null
         return when (target) {
             ResolvedTarget.VirtualRoot -> StorageEntry(
                 name = "",
@@ -256,8 +256,8 @@ class VirtualStorageManager(
         }
     }
 
-    fun listDirectory(virtualPath: String): List<StorageEntry>? {
-        val target = resolveTarget(virtualPath) ?: return null
+    fun listDirectory(virtualPath: String, slot: Int? = null): List<StorageEntry>? {
+        val target = resolveTarget(virtualPath, slot) ?: return null
         return when (target) {
             ResolvedTarget.VirtualRoot -> listOf(
                 StorageEntry(
@@ -299,8 +299,8 @@ class VirtualStorageManager(
         }
     }
 
-    fun openInputStream(virtualPath: String, offset: Long = 0L): InputStream? {
-        val target = resolveTarget(virtualPath) ?: return null
+    fun openInputStream(virtualPath: String, offset: Long = 0L, slot: Int? = null): InputStream? {
+        val target = resolveTarget(virtualPath, slot) ?: return null
         val stream = when (target) {
             ResolvedTarget.VirtualRoot -> return null
             is ResolvedTarget.LocalTarget -> {
@@ -329,13 +329,13 @@ class VirtualStorageManager(
         return stream
     }
 
-    fun openOutputStream(virtualPath: String, append: Boolean = false): OutputStream? {
+    fun openOutputStream(virtualPath: String, append: Boolean = false, slot: Int? = null): OutputStream? {
         val norm = normalizePath(virtualPath)
         val parentPath = norm.substringBeforeLast('/', "").ifEmpty { "/" }
         val fileName = norm.substringAfterLast('/')
         if (fileName.isBlank()) return null
 
-        val parentTarget = resolveTarget(parentPath) ?: return null
+        val parentTarget = resolveTarget(parentPath, slot) ?: return null
         return when (parentTarget) {
             ResolvedTarget.VirtualRoot -> null
             is ResolvedTarget.LocalTarget -> {
@@ -364,13 +364,13 @@ class VirtualStorageManager(
         }
     }
 
-    fun makeDirectory(virtualPath: String): Boolean {
+    fun makeDirectory(virtualPath: String, slot: Int? = null): Boolean {
         val norm = normalizePath(virtualPath)
         val parentPath = norm.substringBeforeLast('/', "").ifEmpty { "/" }
         val dirName = norm.substringAfterLast('/')
         if (dirName.isBlank()) return false
 
-        val parentTarget = resolveTarget(parentPath) ?: return false
+        val parentTarget = resolveTarget(parentPath, slot) ?: return false
         return when (parentTarget) {
             ResolvedTarget.VirtualRoot -> false
             is ResolvedTarget.LocalTarget -> {
@@ -396,8 +396,8 @@ class VirtualStorageManager(
         }
     }
 
-    fun deleteFile(virtualPath: String): Boolean {
-        val target = resolveTarget(virtualPath) ?: return false
+    fun deleteFile(virtualPath: String, slot: Int? = null): Boolean {
+        val target = resolveTarget(virtualPath, slot) ?: return false
         return when (target) {
             ResolvedTarget.VirtualRoot -> false
             is ResolvedTarget.LocalTarget -> {
@@ -416,8 +416,8 @@ class VirtualStorageManager(
         }
     }
 
-    fun deleteDirectory(virtualPath: String): Boolean {
-        val target = resolveTarget(virtualPath) ?: return false
+    fun deleteDirectory(virtualPath: String, slot: Int? = null): Boolean {
+        val target = resolveTarget(virtualPath, slot) ?: return false
         return when (target) {
             ResolvedTarget.VirtualRoot -> false
             is ResolvedTarget.LocalTarget -> {
@@ -440,21 +440,21 @@ class VirtualStorageManager(
         }
     }
 
-    fun moveOrRename(fromVirtualPath: String, toVirtualPath: String): Boolean {
+    fun moveOrRename(fromVirtualPath: String, toVirtualPath: String, slot: Int? = null): Boolean {
         val fromNorm = normalizePath(fromVirtualPath)
         val toNorm = normalizePath(toVirtualPath)
         if (fromNorm == "/" || toNorm == "/" || fromNorm == toNorm) return false
 
-        val fromTarget = resolveTarget(fromNorm) ?: return false
+        val fromTarget = resolveTarget(fromNorm, slot) ?: return false
         val toParentPath = toNorm.substringBeforeLast('/', "").ifEmpty { "/" }
         val toName = toNorm.substringAfterLast('/')
         if (toName.isBlank()) return false
-        val toParentTarget = resolveTarget(toParentPath) ?: return false
+        val toParentTarget = resolveTarget(toParentPath, slot) ?: return false
         if (toParentTarget is ResolvedTarget.VirtualRoot) return false
 
         if (fromTarget is ResolvedTarget.LocalTarget && fromTarget.file == fromTarget.root) return false
         if (fromTarget is ResolvedTarget.SafTarget && fromTarget.relativeSegments.isEmpty()) return false
-        if (exists(toNorm) && !overwriteExisting) return false
+        if (exists(toNorm, slot) && !overwriteExisting) return false
 
         if (fromTarget is ResolvedTarget.LocalTarget &&
             toParentTarget is ResolvedTarget.LocalTarget &&
@@ -502,26 +502,26 @@ class VirtualStorageManager(
             }
         }
 
-        return copyRecursive(fromNorm, toNorm) && deleteAny(fromNorm)
+        return copyRecursive(fromNorm, toNorm, slot) && deleteAny(fromNorm, slot)
     }
 
-    private fun deleteAny(virtualPath: String): Boolean {
-        val entry = stat(virtualPath) ?: return false
-        return if (entry.isDirectory) deleteDirectory(virtualPath) else deleteFile(virtualPath)
+    private fun deleteAny(virtualPath: String, slot: Int? = null): Boolean {
+        val entry = stat(virtualPath, slot) ?: return false
+        return if (entry.isDirectory) deleteDirectory(virtualPath, slot) else deleteFile(virtualPath, slot)
     }
 
-    private fun copyRecursive(srcPath: String, dstPath: String): Boolean {
-        val srcEntry = stat(srcPath) ?: return false
+    private fun copyRecursive(srcPath: String, dstPath: String, slot: Int? = null): Boolean {
+        val srcEntry = stat(srcPath, slot) ?: return false
         if (srcEntry.isDirectory) {
-            if (!exists(dstPath) && !makeDirectory(dstPath)) return false
-            val children = listDirectory(srcPath) ?: return false
+            if (!exists(dstPath, slot) && !makeDirectory(dstPath, slot)) return false
+            val children = listDirectory(srcPath, slot) ?: return false
             for (child in children) {
-                if (!copyRecursive(child.virtualPath, "$dstPath/${child.name}")) return false
+                if (!copyRecursive(child.virtualPath, "$dstPath/${child.name}", slot)) return false
             }
             return true
         } else {
-            val input = openInputStream(srcPath) ?: return false
-            val output = openOutputStream(dstPath, append = false) ?: run {
+            val input = openInputStream(srcPath, slot = slot) ?: return false
+            val output = openOutputStream(dstPath, append = false, slot = slot) ?: run {
                 input.close()
                 return false
             }

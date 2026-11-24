@@ -51,7 +51,7 @@ fun BeamFtpApp(
     viewModel: ServerViewModel = viewModel()
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    val slotTelemetries by viewModel.slotTelemetries.collectAsStateWithLifecycle()
     val endpoints by viewModel.endpoints.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
@@ -120,12 +120,13 @@ fun BeamFtpApp(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ ->
-        viewModel.toggleServer()
+        viewModel.toggleSlotServer(settings.selectedFtpSlot)
     }
 
     val startServerWithNotificationCheck: () -> Unit = {
-        val isStarting = telemetry.runState == ServerRunState.STOPPED ||
-            telemetry.runState == ServerRunState.ERROR
+        val activeSlot = settings.selectedFtpSlot.coerceIn(1, 4)
+        val slotState = slotTelemetries[activeSlot]?.runState ?: ServerRunState.STOPPED
+        val isStarting = slotState == ServerRunState.STOPPED || slotState == ServerRunState.ERROR
         if (isStarting && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 context,
@@ -134,10 +135,10 @@ fun BeamFtpApp(
             if (!granted) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             } else {
-                viewModel.toggleServer()
+                viewModel.toggleSlotServer(activeSlot)
             }
         } else {
-            viewModel.toggleServer()
+            viewModel.toggleSlotServer(activeSlot)
         }
     }
 
@@ -156,7 +157,7 @@ fun BeamFtpApp(
         ) { innerPadding ->
             ServerDashboardScreen(
                 settings = settings,
-                telemetry = telemetry,
+                slotTelemetries = slotTelemetries,
                 endpoints = endpoints,
                 onSelectFtpSlot = viewModel::selectFtpSlot,
                 onToggleServer = startServerWithNotificationCheck,

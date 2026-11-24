@@ -31,15 +31,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Foreground Service (dataSync) that manages the Apache MINA FTP server.
- * Immediately stops itself and releases all locks whenever FTP is stopped.
+ * Foreground Service (dataSync) that manages up to 4 concurrent Apache MINA FTP slot servers.
+ * Immediately stops itself and releases all locks whenever no FTP slot remains active.
  */
 class FtpServerService : Service() {
 
     companion object {
-        const val ACTION_START = "com.example.action.START_FTP"
-        const val ACTION_STOP = "com.example.action.STOP_FTP"
+        const val ACTION_START_SLOT = "com.example.action.START_FTP_SLOT"
+        const val ACTION_STOP_SLOT = "com.example.action.STOP_FTP_SLOT"
+        const val ACTION_STOP_ALL = "com.example.action.STOP_ALL_FTP"
         const val ACTION_STOP_FROM_NOTIFICATION = "com.example.action.STOP_FROM_NOTIFICATION"
+        const val EXTRA_SLOT = "extra_ftp_slot"
         private const val CHANNEL_ID = "beamftp_server_channel"
         private const val NOTIFICATION_ID = 4021
 
@@ -47,9 +49,10 @@ class FtpServerService : Service() {
         var isServiceRunning: Boolean = false
             private set
 
-        fun startServer(context: Context) {
+        fun startSlot(context: Context, slot: Int) {
             val intent = Intent(context, FtpServerService::class.java).apply {
-                action = ACTION_START
+                action = ACTION_START_SLOT
+                putExtra(EXTRA_SLOT, slot.coerceIn(1, 4))
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -58,10 +61,19 @@ class FtpServerService : Service() {
             }
         }
 
-        fun stopServer(context: Context) {
+        fun stopSlot(context: Context, slot: Int) {
             if (!isServiceRunning) return
             val intent = Intent(context, FtpServerService::class.java).apply {
-                action = ACTION_STOP
+                action = ACTION_STOP_SLOT
+                putExtra(EXTRA_SLOT, slot.coerceIn(1, 4))
+            }
+            context.startService(intent)
+        }
+
+        fun stopAll(context: Context) {
+            if (!isServiceRunning) return
+            val intent = Intent(context, FtpServerService::class.java).apply {
+                action = ACTION_STOP_ALL
             }
             context.startService(intent)
         }
@@ -88,7 +100,7 @@ class FtpServerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val app = application as BeamFtpApplication
         when (intent?.action) {
-            ACTION_STOP -> {
+            ACTION_STOP_ALL -> {
                 stopEngineAndService(closeApp = false)
                 return START_NOT_STICKY
             }
@@ -96,11 +108,40 @@ class FtpServerService : Service() {
                 stopEngineAndService(closeApp = true)
                 return START_NOT_STICKY
             }
-            ACTION_START, null -> {
-                promoteToForeground("Initializing FTP PC server...", 0, readOnly = false)
+            ACTION_STOP_SLOT -> {
+                val slot = intent.getIntExtra(EXTRA_SLOT, 1).coerceIn(1, 4)
+                serviceScope.launch {
+                    withContext(Dispatchers.IO) {
+                        ftpEngine.stopSlot(slot)
+                    }
+                    if (!ftpEngine.hasAnyActiveSlot()) {
+                        stopForegroundAndRelease()
+                        getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
+                        stopSelf()
+                    } else {
+                        val settings = lastAppliedSettings ?: app.settingsRepository.settingsFlow.first()
+                        updateNotificationFromSlots(settings, ftpEngine.slotTelemetries.value)
+                    }
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_START_SLOT, null -> {
+                val requestedSlot = intent?.getIntExtra(EXTRA_SLOT, -1) ?: -1
+                if (!ftpEngine.hasAnyActiveSlot()) {
+                    promoteToForeground(
+                        title = "FTP PC • Starting...",
+                        urlText = "Initializing FTP server...",
+                        readOnly = false
+                    )
+                }
                 serviceScope.launch {
                     val settings = app.settingsRepository.settingsFlow.first()
-                    startEngineWithSettings(app, settings)
+                    val slot = if (requestedSlot in 1..4) requestedSlot else settings.selectedFtpSlot.coerceIn(1, 4)
+                    lastAppliedSettings = settings
+                    syncPowerLocks(settings)
+                    ftpEngine.startSlot(slot, settings)
+                    observeSettingsChanges(app)
+                    observeTelemetry(app)
                 }
                 return START_NOT_STICKY
             }
@@ -108,33 +149,14 @@ class FtpServerService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startEngineWithSettings(app: BeamFtpApplication, initialSettings: AppSettings) {
-        lastAppliedSettings = initialSettings
-        syncPowerLocks(initialSettings)
-        ftpEngine.start(initialSettings)
-        observeSettingsChanges(app)
-        observeTelemetry(app)
-    }
-
     private fun observeSettingsChanges(app: BeamFtpApplication) {
         if (settingsJob?.isActive == true) return
         settingsJob = serviceScope.launch {
             app.settingsRepository.settingsFlow.collect { latest ->
-                val previous = lastAppliedSettings
                 lastAppliedSettings = latest
-
                 ftpEngine.updateSettings(latest)
                 syncPowerLocks(latest)
-
-                if (previous != null &&
-                    previous.port != latest.port &&
-                    ftpEngine.telemetry.value.runState == ServerRunState.RUNNING
-                ) {
-                    withContext(Dispatchers.IO) { ftpEngine.stop() }
-                    ftpEngine.start(latest)
-                }
-
-                updateNotificationFromState(latest, ftpEngine.telemetry.value)
+                updateNotificationFromSlots(latest, ftpEngine.slotTelemetries.value)
             }
         }
     }
@@ -142,41 +164,66 @@ class FtpServerService : Service() {
     private fun observeTelemetry(app: BeamFtpApplication) {
         if (telemetryJob?.isActive == true) return
         telemetryJob = serviceScope.launch {
-            ftpEngine.telemetry.collect { state ->
-                if (state.runState == ServerRunState.STOPPED) {
+            ftpEngine.slotTelemetries.collect { slotsMap ->
+                if (!ftpEngine.hasAnyActiveSlot()) {
                     stopForegroundAndRelease()
                     getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
                     stopSelf()
                     return@collect
                 }
                 val settings = lastAppliedSettings ?: app.settingsRepository.settingsFlow.first()
-                updateNotificationFromState(settings, state)
+                updateNotificationFromSlots(settings, slotsMap)
             }
         }
     }
 
-    private fun updateNotificationFromState(settings: AppSettings, state: FtpEngineTelemetry) {
-        val statusText = when (state.runState) {
-            ServerRunState.STARTING -> "Starting FTP server on port ${settings.port}..."
-            ServerRunState.ERROR -> state.errorMessage ?: "FTP server error on port ${settings.port}"
-            ServerRunState.STOPPED -> return
-            ServerRunState.RUNNING -> {
-                val endpoints = NetworkAddressDetector.detectEndpoints(preferHotspot = settings.preferHotspotIp)
-                endpoints.firstOrNull()
-                    ?.toFtpUrl(state.boundPort, settings.username, settings.allowAnonymous)
-                    ?: "Listening on port ${state.boundPort}"
+    private fun updateNotificationFromSlots(
+        settings: AppSettings,
+        slotsMap: Map<Int, FtpEngineTelemetry>
+    ) {
+        val activeSlots = slotsMap.entries
+            .filter { it.value.runState == ServerRunState.RUNNING || it.value.runState == ServerRunState.STARTING }
+            .sortedBy { it.key }
+        if (activeSlots.isEmpty()) return
+
+        val runningSlots = activeSlots.filter { it.value.runState == ServerRunState.RUNNING }
+        val totalConnections = activeSlots.sumOf { it.value.activeConnections }
+        val clientSummary = if (totalConnections == 1) "1 PC connected" else "$totalConnections PCs connected"
+        val endpoint = NetworkAddressDetector.detectEndpoints(preferHotspot = settings.preferHotspotIp).firstOrNull()
+
+        val title: String
+        val body: String
+        if (activeSlots.size == 1) {
+            val (slotNum, telemetry) = activeSlots.first()
+            title = "FTP PC (FTP $slotNum) • $clientSummary"
+            body = when (telemetry.runState) {
+                ServerRunState.STARTING -> "Starting FTP $slotNum on port ${telemetry.boundPort}..."
+                ServerRunState.RUNNING -> endpoint?.toFtpUrl(
+                    telemetry.boundPort,
+                    settings.username,
+                    settings.allowAnonymous
+                ) ?: "Listening on port ${telemetry.boundPort}"
+                else -> "Port ${telemetry.boundPort}"
             }
+        } else {
+            val slotLabels = activeSlots.joinToString(", ") { (slotNum, t) ->
+                "$slotNum:${t.boundPort}"
+            }
+            val hostPart = endpoint?.ipAddress ?: "0.0.0.0"
+            title = "FTP PC (${runningSlots.size.coerceAtLeast(1)} active) • $clientSummary"
+            body = "FTP $slotLabels • $hostPart"
         }
+
         val notif = buildNotification(
-            urlText = statusText,
-            activeConnections = state.activeConnections,
+            title = title,
+            urlText = body,
             readOnly = settings.readOnly
         )
         getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notif)
     }
 
-    private fun promoteToForeground(statusText: String, activeConnections: Int, readOnly: Boolean) {
-        val notification = buildNotification(statusText, activeConnections, readOnly)
+    private fun promoteToForeground(title: String, urlText: String, readOnly: Boolean) {
+        val notification = buildNotification(title, urlText, readOnly)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -204,7 +251,7 @@ class FtpServerService : Service() {
 
         serviceScope.launch {
             withContext(Dispatchers.IO) {
-                ftpEngine.stop()
+                ftpEngine.stopAll()
             }
             stopForegroundAndRelease()
             getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
@@ -271,8 +318,8 @@ class FtpServerService : Service() {
     }
 
     private fun buildNotification(
+        title: String,
         urlText: String,
-        activeConnections: Int,
         readOnly: Boolean
     ): Notification {
         val openIntent = PendingIntent.getActivity(
@@ -293,11 +340,10 @@ class FtpServerService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val clientSummary = if (activeConnections == 1) "1 PC connected" else "$activeConnections PCs connected"
         val modeTag = if (readOnly) "Read-Only" else "Read/Write"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("FTP PC ($modeTag) • $clientSummary")
+            .setContentTitle("$title • $modeTag")
             .setContentText(urlText)
             .setSmallIcon(R.drawable.ic_stat_ftp)
             .setOngoing(true)
@@ -310,8 +356,8 @@ class FtpServerService : Service() {
         isServiceRunning = false
         settingsJob?.cancel()
         telemetryJob?.cancel()
-        if (::ftpEngine.isInitialized && ftpEngine.telemetry.value.runState != ServerRunState.STOPPED) {
-            ftpEngine.stop()
+        if (::ftpEngine.isInitialized && ftpEngine.hasAnyActiveSlot()) {
+            ftpEngine.stopAll()
         }
         releaseLocks()
         serviceScope.cancel()
