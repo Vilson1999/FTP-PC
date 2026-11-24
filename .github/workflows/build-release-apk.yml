@@ -1,19 +1,29 @@
-name: Build Release APKs (ARMv7, ARMv8 & Universal)
+name: Build & Publish GitHub Release APKs
 
 on:
   push:
     branches:
       - main
       - master
+    tags:
+      - "v*"
   pull_request:
     branches:
       - main
       - master
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional GitHub Release tag (e.g. v1.0.1)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
 
 jobs:
   build-release-apks:
-    name: Build ARMv7, ARMv8 & Universal Release APKs
+    name: Build & Release ARMv7, ARMv8 & Universal APKs
     runs-on: ubuntu-latest
 
     steps:
@@ -123,3 +133,38 @@ jobs:
           name: ftp-pc-universal-release-apk
           path: dist-apks/universal/ftp-pc-universal-release.apk
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            VER=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+            VER="${VER:-1.0}"
+            TAG="v${VER}.${{ github.run_number }}"
+          fi
+
+          NOTES="FTP PC Release $TAG (ARMv7, ARMv8 arm64-v8a, and Universal release APKs). Built by Vilson Sonkar."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist-apks/armv7/ftp-pc-armv7-release.apk \
+              dist-apks/armv8/ftp-pc-arm64-v8a-release.apk \
+              dist-apks/universal/ftp-pc-universal-release.apk \
+              --clobber
+          else
+            gh release create "$TAG" \
+              dist-apks/armv7/ftp-pc-armv7-release.apk \
+              dist-apks/armv8/ftp-pc-arm64-v8a-release.apk \
+              dist-apks/universal/ftp-pc-universal-release.apk \
+              --target "${{ github.sha }}" \
+              --title "FTP PC $TAG" \
+              --notes "$NOTES" \
+              --latest
+          fi
