@@ -9,7 +9,7 @@
 
 ## About
 
-FTP PC is an Android app that turns your phone into a local FTP server for transferring and managing files from a computer. The project description highlights running up to four FTP servers simultaneously.
+FTP PC is an Android app that turns your phone into a local FTP server for transferring and managing files from a computer. The project description highlights running up to four FTP servers simultaneously on Android.
 
 ## Features
 
@@ -27,13 +27,13 @@ FTP PC is an Android app that turns your phone into a local FTP server for trans
 <table>
   <tr>
     <td align="center" width="33.33%">
-      <img src="public/assets/aistudio/Screenshot_20261123-005048_2500fcb7.png" alt="FTP PC screenshot 1" width="100%" />
+      <img src="public/assets/screenshots/ftp-pc-ftp1.svg" alt="FTP PC screenshot 1 — FTP 1 offline" width="100%" />
     </td>
     <td align="center" width="33.33%">
-      <img src="public/assets/aistudio/Screenshot_20261123-005105_29b17c4a.png" alt="FTP PC screenshot 2" width="100%" />
+      <img src="public/assets/screenshots/ftp-pc-ftp2.svg" alt="FTP PC screenshot 2 — FTP 2 offline" width="100%" />
     </td>
     <td align="center" width="33.33%">
-      <img src="public/assets/aistudio/Screenshot_20261123-005114_106a23b6.png" alt="FTP PC screenshot 3" width="100%" />
+      <img src="public/assets/screenshots/ftp-pc-active.svg" alt="FTP PC screenshot 3 — FTP server online" width="100%" />
     </td>
   </tr>
 </table>
