@@ -22,6 +22,22 @@ FTP PC is an Android app that turns your phone into a local FTP server for trans
 | **Background** | Optionally keep the FTP server running in the background while it is active. |
 | **Settings** | Configure options such as read-only access, anonymous access, hidden files, overwrite behavior, and transfer buffer size. |
 
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="33.33%">
+      <img src="public/assets/aistudio/Screenshot_20261123-005048_2500fcb7.png" alt="FTP PC screenshot 1" width="100%" />
+    </td>
+    <td align="center" width="33.33%">
+      <img src="public/assets/aistudio/Screenshot_20261123-005105_29b17c4a.png" alt="FTP PC screenshot 2" width="100%" />
+    </td>
+    <td align="center" width="33.33%">
+      <img src="public/assets/aistudio/Screenshot_20261123-005114_106a23b6.png" alt="FTP PC screenshot 3" width="100%" />
+    </td>
+  </tr>
+</table>
+
 ## Getting started
 
 1. Install and open **FTP PC** on your Android device.
